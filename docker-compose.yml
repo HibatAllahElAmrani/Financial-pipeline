@@ -1,7 +1,25 @@
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.1
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./scripts:/opt/airflow/scripts
+  depends_on:
+    postgres:
+      condition: service_healthy
 
 services:
 
-  # ─── Zookeeper (requis par Kafka) ───────────────────────────────────────────
+  # ─── Zookeeper ───────────────────────────────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
@@ -11,7 +29,7 @@ services:
     ports:
       - "2181:2181"
 
-  # ─── Kafka Broker ───────────────────────────────────────────────────────────
+  # ─── Kafka ───────────────────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka
@@ -28,13 +46,13 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
-  # ─── HDFS NameNode ──────────────────────────────────────────────────────────
+  # ─── HDFS NameNode ───────────────────────────────────────────────────────────
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: namenode
     ports:
-      - "9870:9870"   # Web UI
-      - "9000:9000"   # HDFS RPC
+      - "9870:9870"
+      - "9000:9000"
     environment:
       - CLUSTER_NAME=financial-cluster
     env_file:
@@ -42,7 +60,7 @@ services:
     volumes:
       - hadoop_namenode:/hadoop/dfs/name
 
-  # ─── HDFS DataNode ──────────────────────────────────────────────────────────
+  # ─── HDFS DataNode ───────────────────────────────────────────────────────────
   datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     container_name: datanode
@@ -55,7 +73,7 @@ services:
     volumes:
       - hadoop_datanode:/hadoop/dfs/data
 
-  # ─── Spark Master ───────────────────────────────────────────────────────────
+  # ─── Spark Master ────────────────────────────────────────────────────────────
   spark-master:
     image: apache/spark:3.4.1
     container_name: spark-master
@@ -64,10 +82,10 @@ services:
       - SPARK_NO_DAEMONIZE=true
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     ports:
-      - "8080:8080"   # Web UI Spark Master
-      - "7077:7077"   # Port Spark Master
+      - "8080:8080"
+      - "7077:7077"
 
-  # ─── Spark Worker ───────────────────────────────────────────────────────────
+  # ─── Spark Worker ────────────────────────────────────────────────────────────
   spark-worker:
     image: apache/spark:3.4.1
     container_name: spark-worker
@@ -80,9 +98,9 @@ services:
       - SPARK_WORKER_CORES=2
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     ports:
-      - "8081:8081"   # Web UI Spark Worker
+      - "8081:8081"
 
-      # ─── Jupyter Notebook (Spark Client) ───────────────────────────────────────
+  # ─── Jupyter ─────────────────────────────────────────────────────────────────
   jupyter:
     image: jupyter/pyspark-notebook
     container_name: jupyter
@@ -96,7 +114,7 @@ services:
     volumes:
       - ./notebooks:/home/jovyan/work
 
-  # ─── Superset ───────────────────────────────────────────────────────────────
+  # ─── Superset ────────────────────────────────────────────────────────────────
   superset:
     image: apache/superset:latest
     container_name: superset
@@ -114,6 +132,54 @@ services:
         superset run -p 8088 --with-threads
       "
 
+  # ─── PostgreSQL (Airflow Metadata DB) ────────────────────────────────────────
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  # ─── Airflow Init (runs once to set up DB) ───────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command: version
+    entrypoint: >
+      bash -c "
+        airflow db init &&
+        airflow users create
+          --username admin
+          --password admin
+          --firstname Admin
+          --lastname User
+          --role Admin
+          --email admin@airflow.com
+      "
+
+  # ─── Airflow Webserver + Scheduler ───────────────────────────────────────────
+  airflow:
+    <<: *airflow-common
+    container_name: airflow
+    command: >
+      bash -c "
+        airflow scheduler &
+        airflow webserver -p 8090
+      "
+    ports:
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   hadoop_namenode:
   hadoop_datanode:
+  postgres_db:
